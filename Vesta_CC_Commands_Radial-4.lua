@@ -479,6 +479,8 @@ local function giveBroom()
 
 	local runConnection
 	local cleanup
+	local animTrack
+	local forceFly = false -- only used if the trigger animations can't be loaded
 
 	local function isTriggerPlaying(animator)
 		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
@@ -551,7 +553,7 @@ local function giveBroom()
 				return
 			end
 
-			local shouldFly = isTriggerPlaying(animator)
+			local shouldFly = forceFly or isTriggerPlaying(animator)
 
 			if shouldFly and not flying then
 				activate()
@@ -583,20 +585,47 @@ local function giveBroom()
 		end)
 	end
 
+	local function stopAnim()
+		if animTrack then pcall(function() animTrack:Stop() end) animTrack = nil end
+		forceFly = false
+	end
+
 	tool.Equipped:Connect(function()
 		if not controls then return end
-		task.spawn(setupCharacter, getChar())
+		local char = getChar()
+		task.spawn(setupCharacter, char)
+
+		-- play the trigger animation ourselves so the flight starts automatically
+		stopAnim()
+		local humanoid = char:WaitForChild("Humanoid")
+		local animator = humanoid:WaitForChild("Animator")
+		for _, id in ipairs({"114924283270252", "130490463850590"}) do
+			local anim = Instance.new("Animation")
+			anim.AnimationId = "rbxassetid://" .. id
+			local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+			if ok and track then
+				track.Looped = true
+				track.Priority = Enum.AnimationPriority.Action
+				track:Play()
+				animTrack = track
+				break
+			end
+		end
+		-- if no animation could be played, fly anyway while the broom is equipped
+		if not animTrack then forceFly = true end
 	end)
 	tool.Unequipped:Connect(function()
+		stopAnim()
 		if cleanup then cleanup() cleanup = nil end
 	end)
 	tool.Destroying:Connect(function()
+		stopAnim()
 		if cleanup then cleanup() cleanup = nil end
 	end)
 	tool.Parent = bp
 end
 
--- Gold Carpet: asset 1016183873, sit on it, MASSIVE gold trails + lighting
+-- Gold Carpet: asset 1016183873, sit on it, rainbow-carpet trail system in gold
 local GOLD_CARPET_ID = 1016183873
 
 local function loadCarpetParts()
@@ -638,9 +667,11 @@ local function giveGoldCarpet()
 		ColorSequenceKeypoint.new(1, DEEP),
 	}
 	local model, bv, bg, loop, cycle
+	local ribbonAlive = false
 
 	local function stop()
 		if loop then loop:Disconnect() loop = nil end
+		ribbonAlive = false
 		if cycle then cycle:Disconnect() cycle = nil end
 		if bv then bv:Destroy() bv = nil end
 		if bg then bg:Destroy() bg = nil end
@@ -683,12 +714,6 @@ local function giveGoldCarpet()
 				p.CanCollide = false
 				p.Massless = true
 				p.Transparency = 0
-				p.Color = GOLD
-				p.Material = Enum.Material.Neon
-				if p:IsA("MeshPart") then p.TextureID = "" end
-				for _, ch in ipairs(p:GetChildren()) do
-					if ch:IsA("SpecialMesh") then ch.TextureId = "" end
-				end
 				parts[d] = p
 				p.Parent = model
 				if d == biggest then main = p end
@@ -721,75 +746,88 @@ local function giveGoldCarpet()
 		mw.Parent = main
 		model.Parent = char
 
-		-- ===== MASSIVE TRAILS =====
-		local sz = main.Size
-		local halfX = math.max(sz.X, sz.Z) / 2
-		local function makeTrail(posA, posB, life, width)
-			local a0 = Instance.new("Attachment", main); a0.Position = posA
-			local a1 = Instance.new("Attachment", main); a1.Position = posB
-			local t = Instance.new("Trail")
-			t.Attachment0 = a0
-			t.Attachment1 = a1
-			t.Lifetime = life
-			t.LightEmission = 1
-			t.LightInfluence = 0
-			t.FaceCamera = true
-			t.MinLength = 0
-			t.Color = goldSeq
-			t.WidthScale = NumberSequence.new{NumberSequenceKeypoint.new(0,width), NumberSequenceKeypoint.new(1,0)}
-			t.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(0.6,0.35), NumberSequenceKeypoint.new(1,1)}
-			t.Parent = main
-		end
-		-- wide sweeping trails across the carpet + a fat centre ribbon + vertical wake
-		makeTrail(Vector3.new(-halfX,0,0), Vector3.new(halfX,0,0), 4, 1.6)
-		makeTrail(Vector3.new(-halfX*0.5,0.4,0), Vector3.new(halfX*0.5,0.4,0), 5, 2.4)
-		makeTrail(Vector3.new(0,0.2,0), Vector3.new(0,-0.2,0), 6, 14)
-		makeTrail(Vector3.new(0,6,0), Vector3.new(0,-6,0), 3.5, 1.5)
-		makeTrail(Vector3.new(-halfX,0.3,0), Vector3.new(-halfX,-0.3,0), 4.5, 10)
-		makeTrail(Vector3.new( halfX,0.3,0), Vector3.new( halfX,-0.3,0), 4.5, 10)
+		-- ===== RAINBOW CARPET TRAIL (same system as the gear), in GOLD =====
+		ribbonAlive = true
+		local GOLD_STRIPS = {
+			Vector3.new(1.00, 0.96, 0.65),
+			Vector3.new(1.00, 0.90, 0.40),
+			Vector3.new(1.00, 0.83, 0.18),
+			Vector3.new(1.00, 0.76, 0.05),
+			Vector3.new(0.95, 0.68, 0.00),
+			Vector3.new(0.85, 0.58, 0.00),
+			Vector3.new(0.70, 0.45, 0.00),
+		}
+		local BaseUrl = "http://www.roblox.com/asset/?id="
 
-		-- ===== PARTICLES =====
-		local function emitter(tex, rate, life, speed, size, color)
-			local e = Instance.new("ParticleEmitter")
-			e.Texture = tex
-			e.Color = color or ColorSequence.new(PALE, GOLD)
-			e.LightEmission = 1
-			e.LightInfluence = 0
-			e.Rate = rate
-			e.Lifetime = NumberRange.new(life*0.6, life)
-			e.Speed = NumberRange.new(speed*0.5, speed)
-			e.SpreadAngle = Vector2.new(180,180)
-			e.Size = size
-			e.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(1,1)}
-			e.RotSpeed = NumberRange.new(-150,150)
-			e.Parent = main
-			return e
-		end
-		emitter("rbxasset://textures/particles/sparkles_main.dds", 220, 2, 10, NumberSequence.new{NumberSequenceKeypoint.new(0,1.2), NumberSequenceKeypoint.new(1,0)})
-		emitter("rbxasset://textures/particles/smoke_main.dds", 60, 1.4, 3, NumberSequence.new{NumberSequenceKeypoint.new(0,5), NumberSequenceKeypoint.new(1,0)}, ColorSequence.new(GOLD))
-		emitter("rbxasset://textures/particles/sparkles_main.dds", 80, 3, 25, NumberSequence.new{NumberSequenceKeypoint.new(0,0.6), NumberSequenceKeypoint.new(1,0)}, ColorSequence.new(Color3.new(1,1,1), PALE))
+		local ColorPart = Instance.new("Part")
+		ColorPart.Name = "ColorPart"
+		ColorPart.Material = Enum.Material.SmoothPlastic
+		ColorPart.Reflectance = 0.25
+		ColorPart.Transparency = 0.1
+		ColorPart.Size = Vector3.new(1,1,1)
+		ColorPart.Anchored = true
+		ColorPart.CanCollide = false
+		ColorPart.Locked = true
+		ColorPart.TopSurface = Enum.SurfaceType.SmoothNoOutlines
+		ColorPart.BottomSurface = Enum.SurfaceType.SmoothNoOutlines
+		ColorPart.FrontSurface = Enum.SurfaceType.SmoothNoOutlines
+		ColorPart.BackSurface = Enum.SurfaceType.SmoothNoOutlines
+		ColorPart.LeftSurface = Enum.SurfaceType.SmoothNoOutlines
+		ColorPart.RightSurface = Enum.SurfaceType.SmoothNoOutlines
+		local ColorMesh = Instance.new("SpecialMesh")
+		ColorMesh.Name = "Mesh"
+		ColorMesh.MeshType = Enum.MeshType.FileMesh
+		ColorMesh.MeshId = BaseUrl .. "9856898"
+		ColorMesh.TextureId = BaseUrl .. "1361097"
+		ColorMesh.Scale = ColorPart.Size * 2
+		ColorMesh.Offset = Vector3.new(0,0,0)
+		ColorMesh.VertexColor = Vector3.new(1,1,1)
+		ColorMesh.Parent = ColorPart
+		local ColorLight = Instance.new("PointLight")
+		ColorLight.Name = "Light"
+		ColorLight.Brightness = 50
+		ColorLight.Range = 8
+		ColorLight.Shadows = false
+		ColorLight.Enabled = true
+		ColorLight.Parent = ColorPart
 
-		-- ===== LIGHTING =====
-		local lights = {}
-		local function addLight(light)
-			light.Color = GOLD
-			light.Parent = main
-			table.insert(lights, light)
+		local function createGoldRibbon(length, cf)
+			local ribbon = Instance.new("Model")
+			ribbon.Name = "GoldPart"
+			for i, v in ipairs(GOLD_STRIPS) do
+				local part = ColorPart:Clone()
+				part.Name = "Part"
+				part.Size = Vector3.new(0.5, 0.5, length)
+				part.CFrame = cf * CFrame.new(0.5 * (i - (#GOLD_STRIPS + 1) / 2), 0, 0)
+				part.Mesh.Scale = part.Size * 2
+				part.Mesh.VertexColor = v
+				part.Light.Color = Color3.new(v.X, v.Y, v.Z)
+				part.Parent = ribbon
+			end
+			return ribbon
 		end
-		local pl = Instance.new("PointLight"); pl.Range = 60; pl.Brightness = 8; addLight(pl)
-		local pl2 = Instance.new("PointLight"); pl2.Range = 30; pl2.Brightness = 12; addLight(pl2)
-		local sl = Instance.new("SpotLight"); sl.Face = Enum.NormalId.Bottom; sl.Angle = 120; sl.Range = 70; sl.Brightness = 10; addLight(sl)
-		local sl2 = Instance.new("SpotLight"); sl2.Face = Enum.NormalId.Top; sl2.Angle = 120; sl2.Range = 40; sl2.Brightness = 6; addLight(sl2)
 
-		-- gold shimmer + light pulse
-		cycle = RunService.Heartbeat:Connect(function()
-			if not main.Parent then return end
-			local t = (math.sin(os.clock() * 3) + 1) / 2
-			local col = PALE:Lerp(DEEP, t)
-			for _, p in pairs(parts) do p.Color = col end
-			for i, l in ipairs(lights) do
-				l.Color = col
-				l.Brightness = (i <= 2 and (6 + 6*t)) or (5 + 6*t)
+		task.spawn(function()
+			local lastPlace
+			while ribbonAlive and main.Parent and hrp.Parent do
+				local currentPlace = main.Position
+				local vel = hrp.AssemblyLinearVelocity
+				local speed = Vector3.new(vel.X, 0, vel.Z).Magnitude
+				if lastPlace and speed > 10 then
+					local distance = (lastPlace - currentPlace).Magnitude
+					if distance > 0.01 then
+						local length = distance + 3.5
+						local mid = lastPlace + (currentPlace - lastPlace).Unit * (distance / 2)
+						local cf = CFrame.new(mid, currentPlace)
+						local ribbon = createGoldRibbon(length, cf)
+						Debris:AddItem(ribbon, 1)
+						ribbon.Parent = workspace
+					end
+					lastPlace = currentPlace
+				else
+					lastPlace = currentPlace
+				end
+				task.wait(1/10)
 			end
 		end)
 
@@ -949,10 +987,10 @@ floatBtn.Size = UDim2.new(0,62,0,62)
 floatBtn.Position = UDim2.new(1,-82,0.72,0)
 floatBtn.BackgroundColor3 = Color3.fromRGB(0,0,0)
 floatBtn.BorderSizePixel = 0
-floatBtn.Text = "Vesta"
+floatBtn.Text = "V"
 floatBtn.TextColor3 = Color3.fromRGB(255,255,255)
-floatBtn.Font = Enum.Font.Gotham
-floatBtn.TextSize = 15
+floatBtn.Font = Enum.Font.FredokaOne
+floatBtn.TextSize = 36
 floatBtn.AutoButtonColor = false
 floatBtn.Active = true
 floatBtn.Draggable = true
