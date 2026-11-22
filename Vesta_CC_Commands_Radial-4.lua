@@ -311,33 +311,23 @@ local GOLD_CFG = {
 	color = Color3.fromRGB(255, 200, 40),
 	trail = ColorSequence.new(Color3.fromRGB(255, 200, 40), Color3.fromRGB(255, 240, 150)),
 }
-local BROOM_CFG = {
-	name = "Broom",
-	speed = 80,
-	color = Color3.fromRGB(110, 70, 35),
-	trail = ColorSequence.new(Color3.fromRGB(160, 110, 50), Color3.fromRGB(80, 50, 20)),
-	trailEmission = 0.2,
-}
-
 local function fallbackCarpet(cfg)
 	local tool = Instance.new("Tool")
 	tool.RequiresHandle = true
 	local h = Instance.new("Part")
 	h.Name = "Handle"
-	h.Size = cfg.name == "Broom" and Vector3.new(0.4, 0.4, 5) or Vector3.new(4, 0.25, 6)
+	h.Size = Vector3.new(4, 0.25, 6)
 	h.Color = typeof(cfg.color) == "Color3" and cfg.color or Color3.fromRGB(255, 200, 40)
 	h.Material = Enum.Material.Neon
 	h.CanCollide = false
 	h.Parent = tool
-	if cfg.name ~= "Broom" then
-		local mesh = Instance.new("SpecialMesh", h)
-		mesh.MeshType = Enum.MeshType.FileMesh
-		mesh.MeshId = "rbxassetid://223079737"
-		mesh.TextureId = "rbxassetid://1014108463"
-		mesh.Scale = Vector3.new(1.4, 1.4, 1.4)
-		tool.TextureId = "rbxassetid://1014109561"
-		tool.Grip = CFrame.new(-1.47, 0.35, -1.65, 0, 0, -1, -1, 0, 0, 0, 1, 0)
-	end
+	local mesh = Instance.new("SpecialMesh", h)
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.MeshId = "rbxassetid://223079737"
+	mesh.TextureId = "rbxassetid://1014108463"
+	mesh.Scale = Vector3.new(1.4, 1.4, 1.4)
+	tool.TextureId = "rbxassetid://1014109561"
+	tool.Grip = CFrame.new(-1.47, 0.35, -1.65, 0, 0, -1, -1, 0, 0, 0, 1, 0)
 	tool:SetAttribute("Fallback", true)
 	return tool
 end
@@ -554,13 +544,448 @@ local function giveGold()
 	end
 end
 
+-- ===== BROOM (standalone witch broom: click to fly / land) =====
 local function giveBroom()
-	local tool = giveNamed("Broom", 36913601, BROOM_CFG, nil, function()
-		return fallbackCarpet(BROOM_CFG)
-	end)
-	if tool then
-		setupCarpet(tool, BROOM_CFG)
+	local backpack = player:FindFirstChildOfClass("Backpack") or player:WaitForChild("Backpack", 5)
+	if not backpack then
+		return
 	end
+
+	local TOOL_NAME = "Broom"
+	local BROOM_ASSET_ID = 36913601
+	local BROOM_SOUND_ID = "rbxassetid://35886425"
+	local BROOM_IDLE_ANIM_ID = "114924283270252"
+	local BROOM_MOVE_ANIM_ID = "130490463850590"
+	local FLY_SPEED = 80
+	local SEAT_OFFSET = 1.9
+	local BROOM_SHIFT = 1.0
+	local BROOM_FLIP = true
+	local BROOM_ROLL = 0
+	local BROOM_SCALE = 1
+	local ARM_RAISE_DEG = 70
+	local LEAN_DEG = 14
+	local BROOM_TILT = 0.3
+	local MOVE_SMOOTH = 0.15
+
+	for _, container in ipairs({ backpack, player.Character }) do
+		if container then
+			local old = container:FindFirstChild(TOOL_NAME)
+			if old then
+				old:Destroy()
+			end
+		end
+	end
+
+	local loaded
+	do
+		local ok, objs = pcall(function()
+			return game:GetObjects("rbxassetid://" .. tostring(BROOM_ASSET_ID))
+		end)
+		if ok and type(objs) == "table" and objs[1] then
+			loaded = objs[1]
+			for _, d in ipairs(loaded:GetDescendants()) do
+				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+					d:Destroy()
+				end
+			end
+		end
+	end
+
+	local tool
+	if loaded and loaded:IsA("Tool") then
+		tool = loaded
+	else
+		tool = Instance.new("Tool")
+		if loaded and loaded:IsA("BasePart") then
+			loaded.Name = "Handle"
+			loaded.Anchored = false
+			loaded.CanCollide = false
+			loaded.Parent = tool
+		elseif loaded and loaded:IsA("Model") then
+			local primary = loaded.PrimaryPart or loaded:FindFirstChildWhichIsA("BasePart", true)
+			if primary then
+				primary.Name = "Handle"
+				for _, part in ipairs(loaded:GetDescendants()) do
+					if part:IsA("BasePart") then
+						part.Anchored = false
+						part.CanCollide = false
+						if part ~= primary then
+							local weld = Instance.new("WeldConstraint")
+							weld.Part0 = primary
+							weld.Part1 = part
+							weld.Parent = primary
+						end
+					end
+				end
+				for _, child in ipairs(loaded:GetChildren()) do
+					child.Parent = tool
+				end
+			end
+			loaded:Destroy()
+		end
+	end
+
+	tool.Name = TOOL_NAME
+	tool.ToolTip = "Click to fly on the broom"
+	tool.CanBeDropped = false
+	tool.TextureId = "rbxthumb://type=Asset&id=" .. tostring(BROOM_ASSET_ID) .. "&w=420&h=420"
+	if not tool:FindFirstChild("Handle") then
+		tool.RequiresHandle = false
+	end
+
+	local flying = false
+	local humanoid, root
+	local flightModel, flightOffset
+	local bodyVel, bodyGyro, loop, idleTrack, moveTrack, flySound
+	local oldAutoRotate
+	local savedC0 = {}
+	local hiddenParts = {}
+
+	local function safeDestroy(inst)
+		if inst and inst.Parent then
+			pcall(function()
+				inst:Destroy()
+			end)
+		end
+	end
+
+	local function hideHeld()
+		for _, d in ipairs(tool:GetDescendants()) do
+			if d:IsA("BasePart") and hiddenParts[d] == nil then
+				hiddenParts[d] = d.Transparency
+				d.Transparency = 1
+			end
+		end
+	end
+
+	local function showHeld()
+		for part, original in pairs(hiddenParts) do
+			if part and part.Parent then
+				part.Transparency = original
+			end
+		end
+		table.clear(hiddenParts)
+	end
+
+	local function buildFlightModel()
+		local model = Instance.new("Model")
+		model.Name = "WitchBroomModel"
+
+		local handle = tool:FindFirstChild("Handle")
+		if handle then
+			for _, child in ipairs(tool:GetChildren()) do
+				if child:IsA("BasePart") or child:IsA("Model") then
+					child:Clone().Parent = model
+				end
+			end
+		end
+
+		local hasParts = model:FindFirstChildWhichIsA("BasePart", true) ~= nil
+
+		if not hasParts then
+			local stick = Instance.new("Part")
+			stick.Name = "Stick"
+			stick.Size = Vector3.new(0.3, 0.3, 6.5)
+			stick.Color = Color3.fromRGB(110, 70, 35)
+			stick.Material = Enum.Material.Wood
+			stick.Parent = model
+
+			local bristles = Instance.new("Part")
+			bristles.Name = "Bristles"
+			bristles.Size = Vector3.new(1.5, 1.1, 2.2)
+			bristles.Color = Color3.fromRGB(190, 150, 80)
+			bristles.Material = Enum.Material.Fabric
+			bristles.CFrame = CFrame.new(0, 0, 4.3)
+			bristles.Parent = model
+
+			local weld = Instance.new("WeldConstraint")
+			weld.Part0 = stick
+			weld.Part1 = bristles
+			weld.Parent = stick
+		end
+
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.CanTouch = false
+				d.CanQuery = false
+			end
+		end
+
+		model.PrimaryPart = model:FindFirstChild("Handle")
+			or model:FindFirstChild("Stick")
+			or model:FindFirstChildWhichIsA("BasePart", true)
+		model.Parent = workspace
+
+		if BROOM_SCALE ~= 1 then
+			pcall(function()
+				model:ScaleTo(BROOM_SCALE)
+			end)
+		end
+
+		local size = model:GetExtentsSize()
+		local align = CFrame.new()
+		if size.X >= size.Y and size.X >= size.Z then
+			align = CFrame.Angles(0, math.rad(90), 0)
+		elseif size.Y >= size.X and size.Y >= size.Z then
+			align = CFrame.Angles(math.rad(90), 0, 0)
+		end
+
+		local flip = BROOM_FLIP and CFrame.Angles(0, math.pi, 0) or CFrame.new()
+		flightOffset = flip * CFrame.Angles(0, 0, math.rad(BROOM_ROLL)) * align
+		flightModel = model
+	end
+
+	local function setMotor(motor, newC0)
+		if motor and motor:IsA("Motor6D") then
+			if savedC0[motor] == nil then
+				savedC0[motor] = motor.C0
+			end
+			motor.C0 = savedC0[motor] * newC0
+		end
+	end
+
+	local function applyPose(character)
+		local isR15 = humanoid and humanoid.RigType == Enum.HumanoidRigType.R15
+		local raise = math.rad(ARM_RAISE_DEG)
+
+		if isR15 then
+			local rUpper = character:FindFirstChild("RightUpperArm")
+			local lUpper = character:FindFirstChild("LeftUpperArm")
+			local upperTorso = character:FindFirstChild("UpperTorso")
+			setMotor(rUpper and rUpper:FindFirstChild("RightShoulder"), CFrame.Angles(raise, 0, math.rad(-8)))
+			setMotor(lUpper and lUpper:FindFirstChild("LeftShoulder"), CFrame.Angles(raise, 0, math.rad(8)))
+			setMotor(upperTorso and upperTorso:FindFirstChild("Waist"), CFrame.Angles(math.rad(-LEAN_DEG), 0, 0))
+		else
+			local torso = character:FindFirstChild("Torso")
+			setMotor(torso and torso:FindFirstChild("Right Shoulder"), CFrame.Angles(0, 0, raise))
+			setMotor(torso and torso:FindFirstChild("Left Shoulder"), CFrame.Angles(0, 0, -raise))
+		end
+	end
+
+	local function restorePose()
+		for motor, original in pairs(savedC0) do
+			if motor and motor.Parent then
+				motor.C0 = original
+			end
+		end
+		table.clear(savedC0)
+	end
+
+	local function stop()
+		flying = false
+
+		if loop then
+			loop:Disconnect()
+			loop = nil
+		end
+		for _, track in ipairs({ idleTrack, moveTrack }) do
+			pcall(function()
+				track:Stop(0)
+				track:Destroy()
+			end)
+		end
+		idleTrack, moveTrack = nil, nil
+		if flySound then
+			pcall(function()
+				flySound:Stop()
+			end)
+			safeDestroy(flySound)
+			flySound = nil
+		end
+
+		restorePose()
+		showHeld()
+
+		safeDestroy(bodyVel)
+		safeDestroy(bodyGyro)
+		safeDestroy(flightModel)
+		bodyVel, bodyGyro, flightModel = nil, nil, nil
+
+		if humanoid and humanoid.Parent then
+			humanoid.Sit = false
+			humanoid.PlatformStand = false
+			humanoid.AutoRotate = oldAutoRotate ~= nil and oldAutoRotate or true
+			pcall(function()
+				humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			end)
+		end
+
+		if root and root.Parent then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	local function setAnimState(moving)
+		local want = (moving and moveTrack) or idleTrack or moveTrack
+		local other = (want == moveTrack) and idleTrack or moveTrack
+		if want and not want.IsPlaying then
+			want:Play(0.2)
+		end
+		if other and other ~= want and other.IsPlaying then
+			other:Stop(0.2)
+		end
+	end
+
+	local function start()
+		local character = player.Character
+		if not character or tool.Parent ~= character then
+			return
+		end
+
+		humanoid = character:FindFirstChildOfClass("Humanoid")
+		root = character:FindFirstChild("HumanoidRootPart")
+		if not humanoid or not root or humanoid.Health <= 0 then
+			return
+		end
+
+		oldAutoRotate = humanoid.AutoRotate
+		flying = true
+
+		buildFlightModel()
+		hideHeld()
+
+		do
+			flightModel:PivotTo(root.CFrame * CFrame.new(0, -SEAT_OFFSET, BROOM_SHIFT) * flightOffset)
+			for _, d in ipairs(flightModel:GetDescendants()) do
+				if d:IsA("BasePart") then
+					local w = Instance.new("WeldConstraint")
+					w.Part0 = root
+					w.Part1 = d
+					w.Parent = d
+					d.Massless = true
+					d.Anchored = false
+				end
+			end
+		end
+
+		humanoid.AutoRotate = false
+		humanoid.Sit = true
+
+		local animator = humanoid:FindFirstChildOfClass("Animator")
+		local function loadTrack(id)
+			if not animator or id == "" then
+				return nil
+			end
+			local ok, track = pcall(function()
+				local anim = Instance.new("Animation")
+				anim.AnimationId = "rbxassetid://" .. id
+				local t = animator:LoadAnimation(anim)
+				t.Priority = Enum.AnimationPriority.Action4
+				t.Looped = true
+				return t
+			end)
+			return ok and track or nil
+		end
+		idleTrack = loadTrack(BROOM_IDLE_ANIM_ID)
+		moveTrack = loadTrack(BROOM_MOVE_ANIM_ID)
+		setAnimState(false)
+		task.delay(1.5, function()
+			if not flying then
+				return
+			end
+			local loadedOk = (idleTrack and idleTrack.Length > 0) or (moveTrack and moveTrack.Length > 0)
+			if not loadedOk then
+				applyPose(character)
+			end
+		end)
+
+		flySound = Instance.new("Sound")
+		flySound.Name = "BroomFlySound"
+		flySound.SoundId = BROOM_SOUND_ID
+		flySound.Looped = true
+		flySound.Volume = 1
+		flySound.Parent = root
+		flySound:Play()
+
+		bodyVel = Instance.new("BodyVelocity")
+		bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+		bodyVel.Velocity = Vector3.zero
+		bodyVel.Parent = root
+
+		bodyGyro = Instance.new("BodyGyro")
+		bodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+		bodyGyro.P = 12000
+		bodyGyro.CFrame = root.CFrame
+		bodyGyro.Parent = root
+
+		root.AssemblyLinearVelocity = Vector3.new(0, 20, 0)
+
+		local pitchSmooth, rollSmooth = 0, 0
+		local smoothVel = Vector3.zero
+
+		loop = RunService.RenderStepped:Connect(function()
+			if not flying or not root or not root.Parent or not humanoid or humanoid.Health <= 0 then
+				stop()
+				return
+			end
+
+			if not humanoid.Sit then
+				humanoid.Sit = true
+			end
+
+			local cam = workspace.CurrentCamera
+			if not cam then
+				return
+			end
+
+			local look = cam.CFrame.LookVector
+			local flat = Vector3.new(look.X, 0, look.Z)
+			if flat.Magnitude > 0.01 then
+				flat = flat.Unit
+			else
+				flat = Vector3.new(0, 0, -1)
+			end
+			local right = Vector3.new(-flat.Z, 0, flat.X)
+
+			local move = humanoid.MoveDirection
+			local sideAmount = move:Dot(right)
+			local direction = look * move:Dot(flat) + right * sideAmount
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+				direction += Vector3.new(0, 1, 0)
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+				direction += Vector3.new(0, -1, 0)
+			end
+
+			if direction.Magnitude > 1 then
+				direction = direction.Unit
+			end
+
+			smoothVel = smoothVel:Lerp(direction * FLY_SPEED, MOVE_SMOOTH)
+			local velocity = smoothVel
+			bodyVel.Velocity = velocity
+			setAnimState(direction.Magnitude > 0.1)
+
+			pitchSmooth += ((velocity.Y / FLY_SPEED) * 0.35 * BROOM_TILT - pitchSmooth) * 0.08
+			rollSmooth += ((-sideAmount) * 0.3 * BROOM_TILT - rollSmooth) * 0.08
+
+			local orient = CFrame.lookAt(root.Position, root.Position + flat) * CFrame.Angles(pitchSmooth, 0, rollSmooth)
+			bodyGyro.CFrame = orient
+		end)
+	end
+
+	tool.Activated:Connect(function()
+		if flying then
+			stop()
+		else
+			start()
+		end
+	end)
+
+	local charRemoving = player.CharacterRemoving:Connect(stop)
+
+	tool.Unequipped:Connect(stop)
+	tool.Destroying:Connect(function()
+		stop()
+		charRemoving:Disconnect()
+	end)
+
+	mark(tool)
+	tool.Parent = backpack
 end
 
 local function setupSpeed(tool, speed)
@@ -651,6 +1076,9 @@ local function giveGravity()
 	tool.Destroying:Connect(stop)
 end
 
+local SHOT_SOUND_ID = "rbxassetid://99204505"
+local HIT_SOUND_ID = "rbxassetid://58274204"
+
 local function giveSeaBow()
 	local tool = giveNamed("Sea Bow", 236438668, nil, nil, function()
 		local t = Instance.new("Tool")
@@ -668,22 +1096,35 @@ local function giveSeaBow()
 		return
 	end
 	local handle = getHandle(tool)
-	if handle then
-		addSound(handle, "Shot", "rbxassetid://99204505", 0.7)
+	if not handle then
+		return
 	end
+	addSound(handle, "Shot", SHOT_SOUND_ID, 0.5)
+	local ready = true
 	tool.Activated:Connect(function()
+		if not ready then
+			return
+		end
+		ready = false
 		local char = getChar()
-		if handle and handle:FindFirstChild("Shot") then
+		if handle:FindFirstChild("Shot") then
 			handle.Shot.Pitch = math.random(90, 110) / 100
 			handle.Shot:Play()
 		end
 		local arrow = Instance.new("Part")
-		arrow.Size = Vector3.new(0.3, 0.3, 2.2)
-		arrow.Color = Color3.fromRGB(0, 200, 255)
-		arrow.Material = Enum.Material.Neon
+		arrow.Name = "SeaArrow"
+		arrow.Size = Vector3.new(0.2, 0.2, 2.5)
+		arrow.Transparency = 0.25
+		arrow.Reflectance = 0.5
 		arrow.CanCollide = false
-		local origin = (handle and handle.Position) or char.HumanoidRootPart.Position
-		arrow.CFrame = CFrame.new(origin, aimPoint(char))
+		arrow.Material = Enum.Material.SmoothPlastic
+		arrow.BrickColor = BrickColor.new("Cyan")
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshId = "rbxassetid://235107348"
+		mesh.TextureId = "rbxassetid://235107780"
+		mesh.Parent = arrow
+		addSound(arrow, "Hit", HIT_SOUND_ID, 1)
+		arrow.CFrame = CFrame.new(handle.Position, aimPoint(char))
 		arrow.AssemblyLinearVelocity = arrow.CFrame.LookVector * 120
 		arrow.Parent = workspace
 		local conn
@@ -691,7 +1132,7 @@ local function giveSeaBow()
 			if part:IsDescendantOf(char) then
 				return
 			end
-			local scale = 8 + 4 * math.random(1, 3)
+			local scale = 8 + (4 * math.random(1, 3))
 			pcall(function()
 				workspace.Terrain:FillBall(arrow.Position, scale, Enum.Material.Water)
 				task.delay(7, function()
@@ -700,11 +1141,51 @@ local function giveSeaBow()
 					end)
 				end)
 			end)
+			if arrow:FindFirstChild("Hit") then
+				arrow.Hit:Play()
+			end
 			arrow.Anchored = true
 			arrow.Transparency = 1
 			conn:Disconnect()
 		end)
 		Debris:AddItem(arrow, 8)
+		task.delay(1.2, function()
+			ready = true
+		end)
+	end)
+end
+
+do
+	local JUMP_POWER, BOOST_FRAMES = 78, 8
+	UserInputService.JumpRequest:Connect(function()
+		local char = player.Character
+		if not (char and char:FindFirstChild("Sea Bow")) then
+			return
+		end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if not (hum and root) then
+			return
+		end
+		local st = hum:GetState()
+		if st ~= Enum.HumanoidStateType.Swimming and st ~= Enum.HumanoidStateType.GettingUp then
+			return
+		end
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		local v = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(v.X, JUMP_POWER, v.Z)
+		task.spawn(function()
+			for _ = 1, BOOST_FRAMES do
+				if not root.Parent then
+					break
+				end
+				if root.AssemblyLinearVelocity.Y < JUMP_POWER * 0.7 then
+					local cur = root.AssemblyLinearVelocity
+					root.AssemblyLinearVelocity = Vector3.new(cur.X, math.max(cur.Y, JUMP_POWER * 0.85), cur.Z)
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end)
 	end)
 end
 
@@ -714,32 +1195,70 @@ local function giveRainbow()
 	end)
 end
 
--- ===== GUN / KNIFE: only YOUR real tool. Never a fake box. =====
-local function isKind(name, kind)
+-- Gun / Knife: clone the tool you are holding (RedLuger, water gun, knife, etc).
+-- Falls back to whatever matching tool is sitting in your backpack.
+local GEAR_NAMES = {
+	["blow dryer"] = true,
+	["sea bow"] = true,
+	["speed coil"] = true,
+	["gravity coil"] = true,
+	["broom"] = true,
+	["gold carpet"] = true,
+	["goldencarpet"] = true,
+	["vestagun"] = true,
+	["vestaknife"] = true,
+}
+
+local function isOurGear(tool)
+	if not tool or not tool:IsA("Tool") then
+		return true
+	end
+	if tool:GetAttribute("VestaGiven") then
+		return true
+	end
+	return GEAR_NAMES[string.lower(tool.Name)] == true
+end
+
+local function looksLikeKnife(name)
 	local n = string.lower(name)
-	if n == "vestagun" or n == "vestaknife" then
-		return false
+	return n:find("knife") or n:find("blade") or n:find("sword") or n:find("dagger") or n:find("machete")
+end
+
+local function equippedTool()
+	local char = player.Character
+	if not char then
+		return nil
 	end
-	if kind == "gun" then
-		return n == "gun" or n:find("revolver") or (n:find("gun") and not n:find("coil") and not n:find("carpet"))
+	for _, ch in ipairs(char:GetChildren()) do
+		if ch:IsA("Tool") and not isOurGear(ch) then
+			return ch
+		end
 	end
-	return n == "knife" or n:find("knife") or n:find("blade")
+	return nil
 end
 
 local function findRealWeapon(kind)
-	local char = player.Character
-	if char then
-		for _, ch in ipairs(char:GetChildren()) do
-			if ch:IsA("Tool") and not ch:GetAttribute("VestaGiven") and isKind(ch.Name, kind) then
-				return ch
-			end
+	local held = equippedTool()
+	if held then
+		local knife = looksLikeKnife(held.Name)
+		if kind == "knife" and knife then
+			return held
+		end
+		if kind == "gun" and not knife then
+			return held
 		end
 	end
 	local bp = player:FindFirstChildOfClass("Backpack")
 	if bp then
 		for _, ch in ipairs(bp:GetChildren()) do
-			if ch:IsA("Tool") and not ch:GetAttribute("VestaGiven") and isKind(ch.Name, kind) then
-				return ch
+			if ch:IsA("Tool") and not isOurGear(ch) then
+				local knife = looksLikeKnife(ch.Name)
+				if kind == "knife" and knife then
+					return ch
+				end
+				if kind == "gun" and not knife then
+					return ch
+				end
 			end
 		end
 	end
@@ -751,21 +1270,20 @@ local function giveHeldCopy(kind)
 	if not source then
 		return nil
 	end
-	local copyName = kind == "gun" and "VestaGun" or "VestaKnife"
 	local bp = player:FindFirstChildOfClass("Backpack") or player:WaitForChild("Backpack", 5)
+	local copyName = source.Name .. " Copy"
 	for _, c in ipairs({ bp, player.Character }) do
 		if c and c:FindFirstChild(copyName) then
 			c[copyName]:Destroy()
 		end
 	end
 	local tool = source:Clone()
-	-- keep meshes / TextureId / Grip so the real model shows in the hand and the real icon shows in the hotbar
 	stripScripts(tool)
 	tool.Name = copyName
 	tool.TextureId = source.TextureId
+	tool.ToolTip = source.ToolTip
 	tool.Grip = source.Grip
 	tool.CanBeDropped = false
-	tool.RequiresHandle = source.RequiresHandle
 	mark(tool)
 	tool.Parent = bp
 	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
@@ -774,7 +1292,7 @@ local function giveHeldCopy(kind)
 			hum:EquipTool(tool)
 		end)
 	end
-	return tool
+	return tool, source.Name
 end
 
 local function removeAll()
@@ -1193,15 +1711,17 @@ local buttons = {
 		flash("MURDERER GIVEN")
 	end },
 	{ name = "GUN", action = function()
-		if giveHeldCopy("gun") then
-			flash("GUN IN HAND")
+		local tool, name = giveHeldCopy("gun")
+		if tool then
+			flash((name or "GUN") .. " IN HAND")
 		else
 			flash("NO GUN ON YOU")
 		end
 	end },
 	{ name = "KNIFE", action = function()
-		if giveHeldCopy("knife") then
-			flash("KNIFE IN HAND")
+		local tool, name = giveHeldCopy("knife")
+		if tool then
+			flash((name or "KNIFE") .. " IN HAND")
 		else
 			flash("NO KNIFE ON YOU")
 		end
