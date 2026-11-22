@@ -138,7 +138,6 @@ task.spawn(function()
 	preload(99119158)  -- speed
 	preload(16688968)  -- gravity
 	preload(36913601)  -- broom
-	preload(402305186) -- gold carpet
 	preload(BOMB_ASSET_ID) -- bomb gear
 end)
 
@@ -452,69 +451,62 @@ local function giveGravityCoil()
 	tool.Parent = bp
 end
 
--- Broom (animation-triggered flight)
-local BROOM_TRIGGER_IDS = {
-	["114924283270252"] = true,
-	["130490463850590"] = true,
-}
-local BROOM_FORWARD_SPEED = 90 -- studs/s (forward and backward)
-local BROOM_SIDE_SPEED    = 60 -- studs/s (left and right)
--- true  = fly only while one of the trigger animations is playing
--- false = fly whenever the broom is equipped
-local BROOM_REQUIRE_TRIGGER_ANIM = true
+-- Broom button: runs the animation-triggered flight script (toggle on/off)
+local broomOn = false
+local broomCleanup
 
 local function giveBroom()
-	local bp = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer:WaitForChild("Backpack", 5)
-	if not bp then return end
-	for _, c in ipairs({bp, LocalPlayer.Character}) do
-		if c and c:FindFirstChild("Broom") then c.Broom:Destroy() end
+	if broomOn then
+		broomOn = false
+		if broomCleanup then broomCleanup() broomCleanup = nil end
+		return
 	end
-	local tool = loadReal(36913601, Vector3.new(0.4,0.4,5), Color3.fromRGB(110,70,35))
-	tool.Name = "Broom"
-	tool.CanBeDropped = false
-	tool.TextureId = "rbxthumb://type=Asset&id=36913601&w=420&h=420"
+	broomOn = true
 
+	local player = LocalPlayer
 	local camera = workspace.CurrentCamera
-	local controls
-	pcall(function()
-		controls = require(LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")):GetControls()
-	end)
 
-	local runConnection, attachment, linearVelocity, align, flying
-	local humanoidRef
+	-- Config
+	local TRIGGER_IDS = {
+		["114924283270252"] = true,
+		["130490463850590"] = true,
+	}
+	local FORWARD_SPEED = 90 -- studs/s (forward and backward)
+	local SIDE_SPEED = 60    -- studs/s (left and right)
+
+	-- WASD, gamepad and mobile joystick all go through the default controls module
+	local controls = require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")):GetControls()
+
+	local runConnection -- per-character Heartbeat connection
+	local charConnection
+	local charCleanup
 
 	local function isTriggerPlaying(animator)
 		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
 			local id = tostring(track.Animation.AnimationId):match("%d+")
-			if id and BROOM_TRIGGER_IDS[id] then return true end
+			if id and TRIGGER_IDS[id] then
+				return true
+			end
 		end
 		return false
 	end
 
-	local function deactivate()
-		flying = false
-		if linearVelocity then linearVelocity:Destroy() linearVelocity = nil end
-		if align then align:Destroy() align = nil end
-		if attachment then attachment:Destroy() attachment = nil end
-		if humanoidRef and humanoidRef.Parent then humanoidRef.PlatformStand = false end
-	end
+	local function setupCharacter(character)
+		if runConnection then
+			runConnection:Disconnect()
+			runConnection = nil
+		end
 
-	local function stop()
-		if runConnection then runConnection:Disconnect() runConnection = nil end
-		deactivate()
-	end
+		local humanoid = character:WaitForChild("Humanoid")
+		local root = character:WaitForChild("HumanoidRootPart")
+		local animator = humanoid:WaitForChild("Animator")
 
-	local function start()
-		stop()
-		local character = getChar()
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		local root = character:FindFirstChild("HumanoidRootPart")
-		local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
-		if not (humanoid and root and animator and controls) then return end
-		humanoidRef = humanoid
+		local flying = false
+		local attachment, linearVelocity, align
 
 		local function activate()
 			flying = true
+
 			attachment = Instance.new("Attachment")
 			attachment.Name = "FlightAttachment"
 			attachment.Parent = root
@@ -537,12 +529,31 @@ local function giveBroom()
 			humanoid.PlatformStand = true
 		end
 
+		local function deactivate()
+			flying = false
+
+			if linearVelocity then linearVelocity:Destroy() linearVelocity = nil end
+			if align then align:Destroy() align = nil end
+			if attachment then attachment:Destroy() attachment = nil end
+
+			if humanoid.Parent then
+				humanoid.PlatformStand = false
+			end
+		end
+
+		charCleanup = function()
+			if runConnection then runConnection:Disconnect() runConnection = nil end
+			if flying then deactivate() end
+		end
+
 		runConnection = RunService.Heartbeat:Connect(function()
-			if humanoid.Health <= 0 or not root.Parent then
-				return stop()
+			if humanoid.Health <= 0 then
+				if flying then deactivate() end
+				return
 			end
 
-			local shouldFly = (not BROOM_REQUIRE_TRIGGER_ANIM) or isTriggerPlaying(animator)
+			local shouldFly = isTriggerPlaying(animator)
+
 			if shouldFly and not flying then
 				activate()
 			elseif not shouldFly and flying then
@@ -553,42 +564,79 @@ local function giveBroom()
 				-- x = right(+)/left(-), z = backward(+)/forward(-), relative to the camera
 				local move = controls:GetMoveVector()
 				local camCF = camera.CFrame
-				linearVelocity.VectorVelocity =
-					camCF.RightVector * (move.X * BROOM_SIDE_SPEED)
-					+ camCF.LookVector * (-move.Z * BROOM_FORWARD_SPEED)
+
+				local velocity = camCF.RightVector * (move.X * SIDE_SPEED)
+					+ camCF.LookVector * (-move.Z * FORWARD_SPEED)
+
+				linearVelocity.VectorVelocity = velocity
+
+				-- Face the direction the camera is looking
 				align.CFrame = CFrame.lookAt(root.Position, root.Position + camCF.LookVector)
+			end
+		end)
+
+		humanoid.Died:Once(function()
+			if flying then deactivate() end
+			if runConnection then
+				runConnection:Disconnect()
+				runConnection = nil
 			end
 		end)
 	end
 
-	tool.Equipped:Connect(start)
-	tool.Unequipped:Connect(stop)
-	tool.Destroying:Connect(stop)
-	tool.Parent = bp
+	charConnection = player.CharacterAdded:Connect(setupCharacter)
+	if player.Character then
+		task.spawn(setupCharacter, player.Character)
+	end
+
+	broomCleanup = function()
+		if charConnection then charConnection:Disconnect() charConnection = nil end
+		if charCleanup then charCleanup() charCleanup = nil end
+	end
 end
 
--- Gold Carpet: REAL carpet model, you sit on it, gold version of the rainbow carpet effects
+-- Gold Carpet: asset 1016183873, sit on it, MASSIVE gold trails + lighting
+local GOLD_CARPET_ID = 1016183873
+
+local function loadCarpetParts()
+	local ok, objs = pcall(function() return game:GetObjects("rbxassetid://" .. GOLD_CARPET_ID) end)
+	if not (ok and objs and objs[1]) then return nil end
+	local root = objs[1]
+	stripScripts(root)
+	return root
+end
+
 local function giveGoldCarpet()
 	local bp = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer:WaitForChild("Backpack", 5)
 	if not bp then return end
 	for _, c in ipairs({bp, LocalPlayer.Character}) do
 		if c and c:FindFirstChild("GoldenCarpet") then c.GoldenCarpet:Destroy() end
 	end
-	local tool = loadReal(402305186, Vector3.new(4,0.2,6), Color3.fromRGB(255,200,40))
+
+	-- held tool is just an invisible handle; the carpet you sit on is built on equip
+	local tool = Instance.new("Tool")
 	tool.Name = "GoldenCarpet"
 	tool.CanBeDropped = false
-	tool.TextureId = "rbxassetid://1014109561"
+	tool.RequiresHandle = true
+	tool.TextureId = "rbxthumb://type=Asset&id=" .. GOLD_CARPET_ID .. "&w=420&h=420"
+	local hold = Instance.new("Part")
+	hold.Name = "Handle"
+	hold.Size = Vector3.new(0.5,0.5,0.5)
+	hold.Transparency = 1
+	hold.CanCollide = false
+	hold.Parent = tool
 
-	-- keep an untouched copy of the real model to sit on; hide the held one
-	local template = tool:Clone()
-	for _, d in ipairs(tool:GetDescendants()) do
-		if d:IsA("BasePart") then d.Transparency = 1 end
-	end
+	local source = loadCarpetParts()
 
-	local GOLD   = Color3.fromRGB(255,200,40)
-	local PALE   = Color3.fromRGB(255,240,150)
-	local DEEP   = Color3.fromRGB(200,120,0)
-	local model, bv, bg, loop, glow, cycle
+	local GOLD = Color3.fromRGB(255,200,40)
+	local PALE = Color3.fromRGB(255,245,170)
+	local DEEP = Color3.fromRGB(210,120,0)
+	local goldSeq = ColorSequence.new{
+		ColorSequenceKeypoint.new(0, PALE),
+		ColorSequenceKeypoint.new(0.4, GOLD),
+		ColorSequenceKeypoint.new(1, DEEP),
+	}
+	local model, bv, bg, loop, cycle
 
 	local function stop()
 		if loop then loop:Disconnect() loop = nil end
@@ -606,17 +654,27 @@ local function giveGoldCarpet()
 		local hrp = char:FindFirstChild("HumanoidRootPart")
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if not (hrp and hum) then return end
+		if not source then source = loadCarpetParts() end
 
-		-- build carpet from the real model's parts
 		model = Instance.new("Model")
 		model.Name = "VestaGoldCarpet"
-		local handle = getHandle(template)
-		local parts = {}
-		for _, d in ipairs(template:GetDescendants()) do
-			if d:IsA("BasePart") then
+		local parts, main = {}, nil
+		if source then
+			local list = {}
+			if source:IsA("BasePart") then table.insert(list, source) end
+			for _, d in ipairs(source:GetDescendants()) do
+				if d:IsA("BasePart") then table.insert(list, d) end
+			end
+			-- biggest part becomes the base
+			local biggest, bigVol = nil, -1
+			for _, d in ipairs(list) do
+				local v = d.Size.X * d.Size.Y * d.Size.Z
+				if v > bigVol then biggest, bigVol = d, v end
+			end
+			for _, d in ipairs(list) do
 				local p = d:Clone()
 				for _, ch in ipairs(p:GetChildren()) do
-					if ch:IsA("Script") or ch:IsA("LocalScript") or ch:IsA("Weld") or ch:IsA("WeldConstraint") or ch:IsA("Motor6D") or ch:IsA("ParticleEmitter") or ch:IsA("Trail") then
+					if ch:IsA("Weld") or ch:IsA("WeldConstraint") or ch:IsA("Motor6D") or ch:IsA("ParticleEmitter") or ch:IsA("Trail") or ch:IsA("Script") or ch:IsA("LocalScript") then
 						ch:Destroy()
 					end
 				end
@@ -632,10 +690,20 @@ local function giveGoldCarpet()
 				end
 				parts[d] = p
 				p.Parent = model
+				if d == biggest then main = p end
 			end
 		end
-		local main = handle and parts[handle] or select(2, next(parts))
-		if not main then model:Destroy() model = nil return end
+		if not main then
+			-- fallback flat carpet
+			main = Instance.new("Part")
+			main.Size = Vector3.new(5,0.3,6.5)
+			main.Color = GOLD
+			main.Material = Enum.Material.Neon
+			main.CanCollide = false
+			main.Massless = true
+			main.Parent = model
+			parts[main] = main
+		end
 		model.PrimaryPart = main
 		model:PivotTo(hrp.CFrame * CFrame.new(0, -2.6, 0))
 		for _, p in pairs(parts) do
@@ -652,77 +720,79 @@ local function giveGoldCarpet()
 		mw.Parent = main
 		model.Parent = char
 
-		-- gold trails (rainbow-carpet style, gold palette)
+		-- ===== MASSIVE TRAILS =====
 		local sz = main.Size
-		local a0 = Instance.new("Attachment", main); a0.Position = Vector3.new(-sz.X/2, 0, 0)
-		local a1 = Instance.new("Attachment", main); a1.Position = Vector3.new( sz.X/2, 0, 0)
-		local trail = Instance.new("Trail")
-		trail.Attachment0 = a0
-		trail.Attachment1 = a1
-		trail.Lifetime = 1.6
-		trail.LightEmission = 1
-		trail.FaceCamera = true
-		trail.Color = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, PALE),
-			ColorSequenceKeypoint.new(0.5, GOLD),
-			ColorSequenceKeypoint.new(1, DEEP),
-		}
-		trail.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0.05), NumberSequenceKeypoint.new(1,1)}
-		trail.Parent = main
+		local halfX = math.max(sz.X, sz.Z) / 2
+		local function makeTrail(posA, posB, life, width)
+			local a0 = Instance.new("Attachment", main); a0.Position = posA
+			local a1 = Instance.new("Attachment", main); a1.Position = posB
+			local t = Instance.new("Trail")
+			t.Attachment0 = a0
+			t.Attachment1 = a1
+			t.Lifetime = life
+			t.LightEmission = 1
+			t.LightInfluence = 0
+			t.FaceCamera = true
+			t.MinLength = 0
+			t.Color = goldSeq
+			t.WidthScale = NumberSequence.new{NumberSequenceKeypoint.new(0,width), NumberSequenceKeypoint.new(1,0)}
+			t.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(0.6,0.35), NumberSequenceKeypoint.new(1,1)}
+			t.Parent = main
+		end
+		-- wide sweeping trails across the carpet + a fat centre ribbon + vertical wake
+		makeTrail(Vector3.new(-halfX,0,0), Vector3.new(halfX,0,0), 4, 1.6)
+		makeTrail(Vector3.new(-halfX*0.5,0.4,0), Vector3.new(halfX*0.5,0.4,0), 5, 2.4)
+		makeTrail(Vector3.new(0,0.2,0), Vector3.new(0,-0.2,0), 6, 14)
+		makeTrail(Vector3.new(0,6,0), Vector3.new(0,-6,0), 3.5, 1.5)
+		makeTrail(Vector3.new(-halfX,0.3,0), Vector3.new(-halfX,-0.3,0), 4.5, 10)
+		makeTrail(Vector3.new( halfX,0.3,0), Vector3.new( halfX,-0.3,0), 4.5, 10)
 
-		local c0 = Instance.new("Attachment", main); c0.Position = Vector3.new(0, 0.3, 0)
-		local c1 = Instance.new("Attachment", main); c1.Position = Vector3.new(0,-0.3, 0)
-		local trail2 = Instance.new("Trail")
-		trail2.Attachment0 = c0
-		trail2.Attachment1 = c1
-		trail2.Lifetime = 2.2
-		trail2.LightEmission = 1
-		trail2.WidthScale = NumberSequence.new{NumberSequenceKeypoint.new(0,4), NumberSequenceKeypoint.new(1,0)}
-		trail2.Color = trail.Color
-		trail2.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0.2), NumberSequenceKeypoint.new(1,1)}
-		trail2.Parent = main
+		-- ===== PARTICLES =====
+		local function emitter(tex, rate, life, speed, size, color)
+			local e = Instance.new("ParticleEmitter")
+			e.Texture = tex
+			e.Color = color or ColorSequence.new(PALE, GOLD)
+			e.LightEmission = 1
+			e.LightInfluence = 0
+			e.Rate = rate
+			e.Lifetime = NumberRange.new(life*0.6, life)
+			e.Speed = NumberRange.new(speed*0.5, speed)
+			e.SpreadAngle = Vector2.new(180,180)
+			e.Size = size
+			e.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(1,1)}
+			e.RotSpeed = NumberRange.new(-150,150)
+			e.Parent = main
+			return e
+		end
+		emitter("rbxasset://textures/particles/sparkles_main.dds", 220, 2, 10, NumberSequence.new{NumberSequenceKeypoint.new(0,1.2), NumberSequenceKeypoint.new(1,0)})
+		emitter("rbxasset://textures/particles/smoke_main.dds", 60, 1.4, 3, NumberSequence.new{NumberSequenceKeypoint.new(0,5), NumberSequenceKeypoint.new(1,0)}, ColorSequence.new(GOLD))
+		emitter("rbxasset://textures/particles/sparkles_main.dds", 80, 3, 25, NumberSequence.new{NumberSequenceKeypoint.new(0,0.6), NumberSequenceKeypoint.new(1,0)}, ColorSequence.new(Color3.new(1,1,1), PALE))
 
-		-- sparkles + glow
-		local sp = Instance.new("ParticleEmitter")
-		sp.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-		sp.Color = ColorSequence.new(PALE, GOLD)
-		sp.LightEmission = 1
-		sp.Rate = 80
-		sp.Lifetime = NumberRange.new(0.8, 1.8)
-		sp.Speed = NumberRange.new(2, 7)
-		sp.SpreadAngle = Vector2.new(180,180)
-		sp.Size = NumberSequence.new{NumberSequenceKeypoint.new(0,0.8), NumberSequenceKeypoint.new(1,0)}
-		sp.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0), NumberSequenceKeypoint.new(1,1)}
-		sp.RotSpeed = NumberRange.new(-120,120)
-		sp.Parent = main
+		-- ===== LIGHTING =====
+		local lights = {}
+		local function addLight(light)
+			light.Color = GOLD
+			light.Parent = main
+			table.insert(lights, light)
+		end
+		local pl = Instance.new("PointLight"); pl.Range = 60; pl.Brightness = 8; addLight(pl)
+		local pl2 = Instance.new("PointLight"); pl2.Range = 30; pl2.Brightness = 12; addLight(pl2)
+		local sl = Instance.new("SpotLight"); sl.Face = Enum.NormalId.Bottom; sl.Angle = 120; sl.Range = 70; sl.Brightness = 10; addLight(sl)
+		local sl2 = Instance.new("SpotLight"); sl2.Face = Enum.NormalId.Top; sl2.Angle = 120; sl2.Range = 40; sl2.Brightness = 6; addLight(sl2)
 
-		local gl = Instance.new("ParticleEmitter")
-		gl.Texture = "rbxasset://textures/particles/smoke_main.dds"
-		gl.Color = ColorSequence.new(GOLD)
-		gl.LightEmission = 1
-		gl.Rate = 25
-		gl.Lifetime = NumberRange.new(0.6, 1)
-		gl.Speed = NumberRange.new(0, 2)
-		gl.Size = NumberSequence.new{NumberSequenceKeypoint.new(0,3), NumberSequenceKeypoint.new(1,0)}
-		gl.Transparency = NumberSequence.new{NumberSequenceKeypoint.new(0,0.6), NumberSequenceKeypoint.new(1,1)}
-		gl.Parent = main
-
-		glow = Instance.new("PointLight")
-		glow.Color = GOLD
-		glow.Range = 16
-		glow.Brightness = 2.5
-		glow.Parent = main
-
-		-- animated gold shimmer (the "rainbow cycle", but gold shades)
+		-- gold shimmer + light pulse
 		cycle = RunService.Heartbeat:Connect(function()
 			if not main.Parent then return end
 			local t = (math.sin(os.clock() * 3) + 1) / 2
 			local col = PALE:Lerp(DEEP, t)
 			for _, p in pairs(parts) do p.Color = col end
-			glow.Color = col
+			for i, l in ipairs(lights) do
+				l.Color = col
+				l.Brightness = (i <= 2 and (6 + 6*t)) or (5 + 6*t)
+			end
 		end)
 
-		-- fly
+		-- ===== FLY (sitting) =====
 		hum.Sit = true
 		bv = Instance.new("BodyVelocity")
 		bv.MaxForce = Vector3.new(1e6,1e6,1e6)
@@ -986,7 +1056,7 @@ local buttons = {
 	{name="RAINBOW", action=function() giveRainbow() flash("RAINBOW CARPET") end},
 	{name="BLOW", action=function() giveDryer() flash("BLOW DRYER") end},
 	{name="SEA BOW", action=function() giveSeaBow() flash("SEA BOW") end},
-	{name="BROOM", action=function() giveBroom() flash("BROOM") end},
+	{name="BROOM", action=function() giveBroom() flash(broomOn and "BROOM: ON" or "BROOM: OFF") end},
 	{name="SPEED COIL", action=function() giveSpeedCoil() flash("SPEED COIL") end},
 	{name="GRAVITY COIL", action=function() giveGravityCoil() flash("GRAVITY COIL") end},
 }
