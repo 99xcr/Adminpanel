@@ -877,7 +877,7 @@ end
 
 -- ========== BOMB (real bomb gear) ==========
 -- Click/tap: drops the bomb under your feet, blast launches you up.
--- No cooldown. Infinite double jump while you own it.
+-- No cooldown. Each click = one bomb under your feet + a boost up (a double jump).
 local function giveBomb()
 	local bp = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer:WaitForChild("Backpack", 5)
 	if not bp then return end
@@ -935,14 +935,6 @@ local function giveBomb()
 			end
 		end)
 	end)
-
-	local jumpConn = UserInputService.JumpRequest:Connect(function()
-		local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-		if hum and hum.Health > 0 then
-			hum:ChangeState(Enum.HumanoidStateType.Jumping)
-		end
-	end)
-	tool.Destroying:Connect(function() jumpConn:Disconnect() end)
 
 	tool.Parent = bp
 end
