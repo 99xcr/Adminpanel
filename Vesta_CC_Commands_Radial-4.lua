@@ -209,7 +209,7 @@ local function showMap()
 		mapGui = Instance.new("ScreenGui")
 		mapGui.Name = "VestaMapSelector"
 		mapGui.ResetOnSpawn = false
-		mapGui.DisplayOrder = 50
+		mapGui.DisplayOrder = 200
 		mapGui.Parent = playerGui
 
 		local f = Instance.new("Frame")
@@ -451,40 +451,39 @@ local function giveGravityCoil()
 	tool.Parent = bp
 end
 
--- Broom button: runs the animation-triggered flight script (toggle on/off)
-local broomOn = false
-local broomCleanup
+-- Broom: real broom in your inventory. Equip it to run the animation-triggered flight script.
+local BROOM_TRIGGER_IDS = {
+	["114924283270252"] = true,
+	["130490463850590"] = true,
+}
+local BROOM_FORWARD_SPEED = 90 -- studs/s (forward and backward)
+local BROOM_SIDE_SPEED    = 60 -- studs/s (left and right)
 
 local function giveBroom()
-	if broomOn then
-		broomOn = false
-		if broomCleanup then broomCleanup() broomCleanup = nil end
-		return
+	local bp = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer:WaitForChild("Backpack", 5)
+	if not bp then return end
+	for _, c in ipairs({bp, LocalPlayer.Character}) do
+		if c and c:FindFirstChild("Broom") then c.Broom:Destroy() end
 	end
-	broomOn = true
+	local tool = loadReal(36913601, Vector3.new(0.4,0.4,5), Color3.fromRGB(110,70,35))
+	tool.Name = "Broom"
+	tool.CanBeDropped = false
+	tool.TextureId = "rbxthumb://type=Asset&id=36913601&w=420&h=420"
 
 	local player = LocalPlayer
 	local camera = workspace.CurrentCamera
+	local controls
+	pcall(function()
+		controls = require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")):GetControls()
+	end)
 
-	-- Config
-	local TRIGGER_IDS = {
-		["114924283270252"] = true,
-		["130490463850590"] = true,
-	}
-	local FORWARD_SPEED = 90 -- studs/s (forward and backward)
-	local SIDE_SPEED = 60    -- studs/s (left and right)
-
-	-- WASD, gamepad and mobile joystick all go through the default controls module
-	local controls = require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")):GetControls()
-
-	local runConnection -- per-character Heartbeat connection
-	local charConnection
-	local charCleanup
+	local runConnection
+	local cleanup
 
 	local function isTriggerPlaying(animator)
 		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
 			local id = tostring(track.Animation.AnimationId):match("%d+")
-			if id and TRIGGER_IDS[id] then
+			if id and BROOM_TRIGGER_IDS[id] then
 				return true
 			end
 		end
@@ -541,7 +540,7 @@ local function giveBroom()
 			end
 		end
 
-		charCleanup = function()
+		cleanup = function()
 			if runConnection then runConnection:Disconnect() runConnection = nil end
 			if flying then deactivate() end
 		end
@@ -565,8 +564,8 @@ local function giveBroom()
 				local move = controls:GetMoveVector()
 				local camCF = camera.CFrame
 
-				local velocity = camCF.RightVector * (move.X * SIDE_SPEED)
-					+ camCF.LookVector * (-move.Z * FORWARD_SPEED)
+				local velocity = camCF.RightVector * (move.X * BROOM_SIDE_SPEED)
+					+ camCF.LookVector * (-move.Z * BROOM_FORWARD_SPEED)
 
 				linearVelocity.VectorVelocity = velocity
 
@@ -584,15 +583,17 @@ local function giveBroom()
 		end)
 	end
 
-	charConnection = player.CharacterAdded:Connect(setupCharacter)
-	if player.Character then
-		task.spawn(setupCharacter, player.Character)
-	end
-
-	broomCleanup = function()
-		if charConnection then charConnection:Disconnect() charConnection = nil end
-		if charCleanup then charCleanup() charCleanup = nil end
-	end
+	tool.Equipped:Connect(function()
+		if not controls then return end
+		task.spawn(setupCharacter, getChar())
+	end)
+	tool.Unequipped:Connect(function()
+		if cleanup then cleanup() cleanup = nil end
+	end)
+	tool.Destroying:Connect(function()
+		if cleanup then cleanup() cleanup = nil end
+	end)
+	tool.Parent = bp
 end
 
 -- Gold Carpet: asset 1016183873, sit on it, MASSIVE gold trails + lighting
@@ -944,33 +945,19 @@ floatGui.DisplayOrder = 100
 floatGui.Parent = playerGui
 
 local floatBtn = Instance.new("TextButton")
-floatBtn.Size = UDim2.new(0,120,0,46)
-floatBtn.Position = UDim2.new(1,-140,0.72,0)
-floatBtn.BackgroundColor3 = Color3.fromRGB(255,255,255)
+floatBtn.Size = UDim2.new(0,62,0,62)
+floatBtn.Position = UDim2.new(1,-82,0.72,0)
+floatBtn.BackgroundColor3 = Color3.fromRGB(0,0,0)
 floatBtn.BorderSizePixel = 0
 floatBtn.Text = "Vesta"
-floatBtn.TextColor3 = Color3.fromRGB(0,0,0)
-floatBtn.Font = Enum.Font.FredokaOne
-floatBtn.TextSize = 26
+floatBtn.TextColor3 = Color3.fromRGB(255,255,255)
+floatBtn.Font = Enum.Font.Gotham
+floatBtn.TextSize = 15
 floatBtn.AutoButtonColor = false
 floatBtn.Active = true
 floatBtn.Draggable = true
 floatBtn.Parent = floatGui
 Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(1,0)
-local fStroke = Instance.new("UIStroke", floatBtn)
-fStroke.Thickness = 3.5
-fStroke.Color = Color3.fromRGB(255,255,255)
-fStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-local fGrad = Instance.new("UIGradient", fStroke)
-fGrad.Color = ColorSequence.new{
-	ColorSequenceKeypoint.new(0,    Color3.fromRGB(255,255,255)),
-	ColorSequenceKeypoint.new(0.45, Color3.fromRGB(255,255,255)),
-	ColorSequenceKeypoint.new(0.8,  Color3.fromRGB(110,110,110)),
-	ColorSequenceKeypoint.new(1,    Color3.fromRGB(0,0,0)),
-}
-RunService.RenderStepped:Connect(function()
-	fGrad.Rotation = (os.clock() * 220) % 360
-end)
 
 local radialGui = Instance.new("ScreenGui")
 radialGui.Name = "VestaRadialPanel"
@@ -1056,7 +1043,7 @@ local buttons = {
 	{name="RAINBOW", action=function() giveRainbow() flash("RAINBOW CARPET") end},
 	{name="BLOW", action=function() giveDryer() flash("BLOW DRYER") end},
 	{name="SEA BOW", action=function() giveSeaBow() flash("SEA BOW") end},
-	{name="BROOM", action=function() giveBroom() flash(broomOn and "BROOM: ON" or "BROOM: OFF") end},
+	{name="BROOM", action=function() giveBroom() flash("BROOM") end},
 	{name="SPEED COIL", action=function() giveSpeedCoil() flash("SPEED COIL") end},
 	{name="GRAVITY COIL", action=function() giveGravityCoil() flash("GRAVITY COIL") end},
 }
